@@ -1,0 +1,5 @@
+C:\Users\HP\Music\ZumbidoJao\ZumbidoJao.exe
+C:\Users\HP\Music\ZumbidoJao\ZumbidoJao.dll
+C:\Users\HP\Music\ZumbidoJao\ZumbidoJao.deps.json
+C:\Users\HP\Music\ZumbidoJao\ZumbidoJao.runtimeconfig.json
+C:\Users\HP\Music\ZumbidoJao\ZumbidoJao.pdb

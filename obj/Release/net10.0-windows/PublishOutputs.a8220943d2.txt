@@ -1,0 +1,5 @@
+C:\Users\HP\Pictures\ZumbidoJao.exe
+C:\Users\HP\Pictures\ZumbidoJao.dll
+C:\Users\HP\Pictures\ZumbidoJao.deps.json
+C:\Users\HP\Pictures\ZumbidoJao.runtimeconfig.json
+C:\Users\HP\Pictures\ZumbidoJao.pdb

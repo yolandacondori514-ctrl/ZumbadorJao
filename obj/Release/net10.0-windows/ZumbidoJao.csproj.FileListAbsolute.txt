@@ -1,0 +1,17 @@
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\bin\Release\net10.0-windows\ZumbidoJao.exe
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\bin\Release\net10.0-windows\ZumbidoJao.deps.json
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\bin\Release\net10.0-windows\ZumbidoJao.runtimeconfig.json
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\bin\Release\net10.0-windows\ZumbidoJao.dll
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\bin\Release\net10.0-windows\ZumbidoJao.pdb
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.Form1.resources
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.csproj.GenerateResource.cache
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.AssemblyInfoInputs.cache
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.AssemblyInfo.cs
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.csproj.CoreCompileInputs.cache
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.dll
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\refint\ZumbidoJao.dll
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.pdb
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.genruntimeconfig.cache
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ref\ZumbidoJao.dll
+C:\Users\HP\source\repos\ZumbidoJao\ZumbidoJao\obj\Release\net10.0-windows\ZumbidoJao.csproj.Up2Date
