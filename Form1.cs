@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Media;
@@ -37,7 +36,7 @@ namespace ZumbidoJao
         private const int TIMEOUT_CLIENTE_MS = 5000;
         private static readonly TimeSpan VENTANA_DEDUPLICACION = TimeSpan.FromSeconds(10);
         private readonly CancellationTokenSource servidorCts = new();
-        private readonly SemaphoreSlim clientesActivos = new(MAX_CLIENTES_SIMULTANEOS, MAX_CLIENTES_SIMULTANEOS);
+        private readonly ClientConcurrencyLimiter clientesActivos = new(MAX_CLIENTES_SIMULTANEOS);
         private readonly ConcurrentDictionary<Task, byte> tareasClientes = new();
         private readonly ConcurrentDictionary<string, DateTimeOffset> alertasRecientes = new();
         private TcpListener? listener;
@@ -356,13 +355,14 @@ namespace ZumbidoJao
                         break;
                     }
 
-                    if (!clientesActivos.Wait(0))
+                    IDisposable? reservaCliente = clientesActivos.TryAcquire();
+                    if (reservaCliente is null)
                     {
                         client.Dispose();
                         continue;
                     }
 
-                    Task tareaCliente = ProcesarClienteAsync(client);
+                    Task tareaCliente = ProcesarClienteAsync(client, reservaCliente);
                     tareasClientes.TryAdd(tareaCliente, 0);
                     _ = tareaCliente.ContinueWith(
                         tarea => tareasClientes.TryRemove(tarea, out _),
@@ -388,7 +388,7 @@ namespace ZumbidoJao
             }
         }
 
-        private async Task ProcesarClienteAsync(TcpClient client)
+        private async Task ProcesarClienteAsync(TcpClient client, IDisposable reservaCliente)
         {
             try
             {
@@ -399,17 +399,13 @@ namespace ZumbidoJao
 
                     using NetworkStream stream = client.GetStream();
 
-                    byte[] buffer = new byte[1024];
-                    int bytesLeidos = await stream.ReadAsync(buffer.AsMemory(), clienteCts.Token);
-                    if (bytesLeidos == 0)
-                        return;
-
-                    string mensajeRecibido = Encoding.UTF8.GetString(buffer, 0, bytesLeidos);
+                    AlertRequest solicitud = await AlertProtocol.ReadAsync(stream, clienteCts.Token);
+                    string mensajeRecibido = $"Se requiere la presencia del JAO en la Caja {solicitud.BoxNumber}";
                     string origen = string.Empty;
                     if (client.Client.RemoteEndPoint is IPEndPoint ep)
                         origen = ep.Address.ToString();
 
-                    if (!RegistrarAlerta(origen, mensajeRecibido))
+                    if (!RegistrarAlerta(origen, solicitud.RequestId))
                         return;
 
                     string identidadEmisor = "TCP sin TLS";
@@ -459,13 +455,13 @@ namespace ZumbidoJao
             }
             finally
             {
-                clientesActivos.Release();
+                reservaCliente.Dispose();
             }
         }
 
-        private bool RegistrarAlerta(string origen, string mensaje)
+        private bool RegistrarAlerta(string origen, Guid requestId)
         {
-            string clave = $"{origen}|{mensaje}";
+            string clave = $"{origen}|{requestId:D}";
             DateTimeOffset ahora = DateTimeOffset.UtcNow;
 
             if (alertasRecientes.TryGetValue(clave, out DateTimeOffset ultima) && ahora - ultima < VENTANA_DEDUPLICACION)
@@ -539,10 +535,8 @@ namespace ZumbidoJao
         private async void BtnEnviar_Click(object? sender, EventArgs e)
         {
             string ip = txtIpDestino.Text.Trim();
-            string caja = "1";
-            // Protección rápida: evitar NullReference si cboCaja es null
-            caja = cboCaja?.SelectedItem?.ToString() ?? "1";
-            string mensaje = $"Se requiere la presencia del JAO en la Caja {caja}";
+            int numeroCaja = cboCaja?.SelectedIndex is >= 0 and <= 9 ? cboCaja.SelectedIndex + 1 : 1;
+            string mensaje = $"Se requiere la presencia del JAO en la Caja {numeroCaja}";
 
             if (string.IsNullOrEmpty(ip)) return;
 
@@ -555,8 +549,8 @@ namespace ZumbidoJao
                     await client.ConnectAsync(ip, PUERTO);
                     using (NetworkStream stream = client.GetStream())
                     {
-                        byte[] data = Encoding.UTF8.GetBytes(mensaje);
-                        await stream.WriteAsync(data, 0, data.Length);
+                        AlertRequest solicitud = AlertProtocol.CreateRequest(numeroCaja);
+                        await AlertProtocol.WriteAsync(stream, solicitud);
                         enviado = true;
                     }
                 }
