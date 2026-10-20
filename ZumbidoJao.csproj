@@ -6,13 +6,18 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-    <PackageIcon>abeja.ico.ico</PackageIcon>
+    <PackageIcon>abeja.ico</PackageIcon>
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="bin\Release\net10.0-windows\abeja.ico">
-      <Pack>True</Pack>
+    <Content Include="abeja.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Pack>true</Pack>
       <PackagePath>\</PackagePath>
+    </Content>
+    <None Include="..\scripts\Uninstall-ZumbidoJao.ps1" Link="Uninstall-ZumbidoJao.ps1">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </None>
   </ItemGroup>
 

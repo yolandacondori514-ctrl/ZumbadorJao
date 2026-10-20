@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Net;
@@ -20,33 +21,10 @@ namespace ZumbidoJao
         {
             try
             {
-                string dir = AppContext.BaseDirectory;
-                for (int level = 0; level < 8 && !string.IsNullOrEmpty(dir); level++)
-                {
-                    // 1) archivo en el propio directorio
-                    string candidate = Path.Combine(dir, "abeja.ico");
-                    if (File.Exists(candidate)) return candidate;
-
-                    // 2) fichero en subcarpeta 'ZumbidoJao' o en la propia carpeta del proyecto
-                    try
-                    {
-                        string candidate2 = Path.Combine(dir, "ZumbidoJao", "abeja.ico");
-                        if (File.Exists(candidate2)) return candidate2;
-                    }
-                    catch { }
-
-                    // 3) buscar en el directorio actual (top only) para evitar búsquedas recursivas costosas
-                    try
-                    {
-                        var files = Directory.GetFiles(dir, "abeja.ico", SearchOption.TopDirectoryOnly);
-                        if (files != null && files.Length > 0) return files[0];
-                    }
-                    catch { }
-
-                    dir = Path.GetDirectoryName(dir);
-                }
+                string candidate = Path.Combine(AppContext.BaseDirectory, "abeja.ico");
+                return File.Exists(candidate) ? candidate : null;
             }
-            catch { }
+            catch (Exception ex) { RegistrarError("Iconos", "Buscar abeja.ico", ex); }
             return null;
         }
         private NotifyIcon trayIcon = null!;
@@ -55,11 +33,34 @@ namespace ZumbidoJao
         private Button btnEnviar = null!;
         private SoundPlayer soundPlayer = null!;
         private const int PUERTO = 8080;
+        private const int MAX_CLIENTES_SIMULTANEOS = 16;
+        private const int TIMEOUT_CLIENTE_MS = 5000;
+        private static readonly TimeSpan VENTANA_DEDUPLICACION = TimeSpan.FromSeconds(10);
+        private readonly CancellationTokenSource servidorCts = new();
+        private readonly SemaphoreSlim clientesActivos = new(MAX_CLIENTES_SIMULTANEOS, MAX_CLIENTES_SIMULTANEOS);
+        private readonly ConcurrentDictionary<Task, byte> tareasClientes = new();
+        private readonly ConcurrentDictionary<string, DateTimeOffset> alertasRecientes = new();
+        private TcpListener? listener;
+        private Task? tareaServidor;
+        private bool cerrarAplicacion;
+        private bool cierreEnCurso;
+        private bool cierreCompletado;
+
+        private static void RegistrarError(string categoria, string operacion, Exception exception)
+        {
+            AppLogger.Error(categoria, operacion, exception);
+        }
+
+        private static void RegistrarAdvertencia(string categoria, string operacion, Exception? exception = null)
+        {
+            AppLogger.Warning(categoria, operacion, exception);
+        }
 
         // P/Invoke para vibración con XInput (gamepad). Se envía y se detiene tras un periodo.
         [StructLayout(LayoutKind.Sequential)]
         private struct XINPUT_VIBRATION { public ushort wLeftMotorSpeed; public ushort wRightMotorSpeed; }
 
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("xinput1_4.dll", EntryPoint = "XInputSetState")]
         private static extern uint XInputSetState(uint dwUserIndex, ref XINPUT_VIBRATION pVibration);
 
@@ -100,7 +101,7 @@ namespace ZumbidoJao
                     // dibujar texto centrado
                     TextRenderer.DrawText(e.Graphics, btn.Text, btn.Font, btn.ClientRectangle, btn.ForeColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 }
-                catch { }
+                catch (Exception ex) { RegistrarError("UI", "Pintar botón degradado", ex); }
             };
 
             // efectos hover: ligero oscurecimiento en hover para retroalimentación
@@ -108,6 +109,7 @@ namespace ZumbidoJao
             btn.MouseLeave += (s, e) => { btn.Invalidate(); };
             btn.Resize += (s, e) => { btn.Invalidate(); };
         }
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
         [DllImport("user32.dll")] private static extern bool FlashWindowEx(ref FLASHWINFO pwfi);
 
         public Form1()
@@ -127,11 +129,12 @@ namespace ZumbidoJao
                     soundPlayer = new SoundPlayer();
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                RegistrarError("Audio", "Inicializar zumbido.wav", ex);
                 soundPlayer = new SoundPlayer();
             }
-            _ = IniciarServidor();
+            tareaServidor = IniciarServidor();
         }
 
         // Añadir sombra al formulario principal (efecto de iluminación sutil)
@@ -221,12 +224,63 @@ namespace ZumbidoJao
             this.Controls.Add(btnEnviar);
             this.Controls.Add(lblFooter);
 
-            this.FormClosing += (s, e) => {
+            this.FormClosing += Form1_FormClosing;
+        }
+
+        private void CerrarAplicacion()
+        {
+            cerrarAplicacion = true;
+            Close();
+        }
+
+        private async void Form1_FormClosing(object? sender, FormClosingEventArgs e)
+        {
+            if (!cerrarAplicacion)
+            {
                 e.Cancel = true;
-                // Al ocultar a bandeja, quitar icono de la barra de tareas
                 try { this.ShowInTaskbar = false; } catch { }
-                this.Hide();
-            };
+                Hide();
+                return;
+            }
+
+            if (cierreCompletado)
+                return;
+
+            e.Cancel = true;
+            if (cierreEnCurso)
+                return;
+
+            cierreEnCurso = true;
+            await DetenerServidorAsync();
+            cierreCompletado = true;
+            Close();
+        }
+
+        private async Task DetenerServidorAsync()
+        {
+            servidorCts.Cancel();
+            listener?.Stop();
+
+            if (tareaServidor is not null)
+            {
+                try { await tareaServidor; }
+                catch (OperationCanceledException) { }
+                catch (SocketException) { }
+            }
+
+            Task[] tareasPendientes = tareasClientes.Keys.ToArray();
+            if (tareasPendientes.Length > 0)
+            {
+                try { await Task.WhenAll(tareasPendientes); }
+                catch (OperationCanceledException) { }
+            }
+
+            try { trayIcon.Visible = false; } catch { }
+            try { trayIcon.Dispose(); } catch { }
+            try { trayIcon.ContextMenuStrip?.Dispose(); } catch { }
+            try { soundPlayer?.Dispose(); } catch { }
+            clientesActivos.Dispose();
+            servidorCts.Dispose();
         }
 
         private void ConfigurarTrayIcon()
@@ -236,7 +290,7 @@ namespace ZumbidoJao
                 try { this.ShowInTaskbar = true; } catch { }
                 this.Show();
             });
-            menu.Items.Add("Salir", null, (s, e) => Environment.Exit(0));
+            menu.Items.Add("Salir", null, (s, e) => CerrarAplicacion());
 
             trayIcon = new NotifyIcon
             {
@@ -251,8 +305,10 @@ namespace ZumbidoJao
                 string? iconPath = FindAbejaIcon();
                 if (!string.IsNullOrEmpty(iconPath))
                 {
-                    try { trayIcon.Icon = new Icon(iconPath); } catch { trayIcon.Icon = SystemIcons.Application; }
-                    try { this.Icon = new Icon(iconPath); } catch { }
+                    try { trayIcon.Icon = new Icon(iconPath); }
+                    catch (Exception ex) { RegistrarError("Iconos", "Cargar icono de bandeja", ex); trayIcon.Icon = SystemIcons.Application; }
+                    try { this.Icon = new Icon(iconPath); }
+                    catch (Exception ex) { RegistrarError("Iconos", "Cargar icono del formulario", ex); }
                 }
                 else
                 {
@@ -262,9 +318,11 @@ namespace ZumbidoJao
                 // Mostrar el icono en la bandeja ahora que está asignado
                 trayIcon.Visible = true;
             }
-            catch
+            catch (Exception ex)
             {
-                try { trayIcon.Icon = SystemIcons.Information; trayIcon.Visible = true; } catch { }
+                RegistrarError("Iconos", "Configurar icono de bandeja", ex);
+                try { trayIcon.Icon = SystemIcons.Information; trayIcon.Visible = true; }
+                catch (Exception fallbackEx) { RegistrarError("Iconos", "Aplicar icono de fallback", fallbackEx); }
             }
 
             trayIcon.DoubleClick += (s, e) => {
@@ -277,48 +335,153 @@ namespace ZumbidoJao
 
         private async Task IniciarServidor()
         {
-            TcpListener listener = new TcpListener(IPAddress.Any, PUERTO);
+            listener = new TcpListener(IPAddress.Any, PUERTO);
             listener.Start();
 
-            while (true)
+            try
             {
-                using (TcpClient client = await listener.AcceptTcpClientAsync())
-                using (NetworkStream stream = client.GetStream())
+                while (!servidorCts.IsCancellationRequested)
                 {
-                    byte[] buffer = new byte[1024];
-                    int bytesLeidos = await stream.ReadAsync(buffer, 0, buffer.Length);
-                    string mensajeRecibido = Encoding.UTF8.GetString(buffer, 0, bytesLeidos);
-
-                    string origen = string.Empty;
+                    TcpClient client;
                     try
                     {
-                        if (client.Client.RemoteEndPoint is IPEndPoint ep)
-                            origen = ep.Address.ToString();
+                        client = await listener.AcceptTcpClientAsync(servidorCts.Token);
                     }
-                    catch { }
+                    catch (OperationCanceledException) when (servidorCts.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (SocketException) when (servidorCts.IsCancellationRequested)
+                    {
+                        break;
+                    }
 
-                    // Reproducir sonido (si existe zumbido.wav en la carpeta de la app)
+                    if (!clientesActivos.Wait(0))
+                    {
+                        client.Dispose();
+                        continue;
+                    }
+
+                    Task tareaCliente = ProcesarClienteAsync(client);
+                    tareasClientes.TryAdd(tareaCliente, 0);
+                    _ = tareaCliente.ContinueWith(
+                        tarea => tareasClientes.TryRemove(tarea, out _),
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                }
+            }
+            catch (ObjectDisposedException) when (servidorCts.IsCancellationRequested)
+            {
+            }
+            catch (SocketException) when (servidorCts.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                RegistrarError("Red", "Bucle principal del servidor", ex);
+            }
+            finally
+            {
+                listener?.Stop();
+                listener = null;
+            }
+        }
+
+        private async Task ProcesarClienteAsync(TcpClient client)
+        {
+            try
+            {
+                using (client)
+                using (CancellationTokenSource clienteCts = CancellationTokenSource.CreateLinkedTokenSource(servidorCts.Token))
+                {
+                    clienteCts.CancelAfter(TIMEOUT_CLIENTE_MS);
+
+                    using NetworkStream stream = client.GetStream();
+
+                    byte[] buffer = new byte[1024];
+                    int bytesLeidos = await stream.ReadAsync(buffer.AsMemory(), clienteCts.Token);
+                    if (bytesLeidos == 0)
+                        return;
+
+                    string mensajeRecibido = Encoding.UTF8.GetString(buffer, 0, bytesLeidos);
+                    string origen = string.Empty;
+                    if (client.Client.RemoteEndPoint is IPEndPoint ep)
+                        origen = ep.Address.ToString();
+
+                    if (!RegistrarAlerta(origen, mensajeRecibido))
+                        return;
+
+                    string identidadEmisor = "TCP sin TLS";
+
                     try
                     {
                         soundPlayer?.Play();
                     }
-                    catch { }
+                    catch (Exception ex) { RegistrarError("Audio", "Reproducir zumbido recibido", ex); }
 
-                    // Intentar vibrar un gamepad si hay uno conectado; si no, hacer una alerta visual
                     try
                     {
                         bool vibrated = TryVibrateAnyGamepad(600);
                         if (!vibrated)
                         {
                             FlashWindowNotification();
-                            try { trayIcon?.ShowBalloonTip(3000, "Asistencia requerida", mensajeRecibido, ToolTipIcon.Info); } catch { }
+                            try { trayIcon?.ShowBalloonTip(3000, "Asistencia requerida", mensajeRecibido, ToolTipIcon.Info); }
+                            catch (Exception ex) { RegistrarError("UI", "Mostrar notificación de bandeja", ex); }
                         }
                     }
-                    catch { }
+                    catch (Exception ex) { RegistrarError("Alertas", "Activar vibración o alerta visual", ex); }
 
-                    this.Invoke(new Action(() => ActivarZumbido(mensajeRecibido, origen)));
+                    if (!IsDisposed && IsHandleCreated)
+                    {
+                        try
+                        {
+                            BeginInvoke(new Action(() => _ = ActivarZumbidoAsync(mensajeRecibido, origen, identidadEmisor)));
+                        }
+
+                        catch (InvalidOperationException ex) { RegistrarError("UI", "Programar alerta en el hilo de UI", ex); }
+                    }
                 }
             }
+            catch (OperationCanceledException ex)
+            {
+                RegistrarAdvertencia("Red", "Cliente cancelado o agotó el timeout", ex);
+            }
+            catch (IOException ex)
+            {
+                RegistrarError("Red", "Leer cliente TCP", ex);
+            }
+            catch (SocketException ex)
+            {
+                RegistrarError("Red", "Procesar socket del cliente", ex);
+            }
+            catch (Exception ex)
+            {
+                RegistrarError("Red", "Error inesperado al procesar cliente TCP", ex);
+            }
+            finally
+            {
+                clientesActivos.Release();
+            }
+        }
+
+        private bool RegistrarAlerta(string origen, string mensaje)
+        {
+            string clave = $"{origen}|{mensaje}";
+            DateTimeOffset ahora = DateTimeOffset.UtcNow;
+
+            if (alertasRecientes.TryGetValue(clave, out DateTimeOffset ultima) && ahora - ultima < VENTANA_DEDUPLICACION)
+                return false;
+
+            alertasRecientes[clave] = ahora;
+
+            foreach (KeyValuePair<string, DateTimeOffset> alerta in alertasRecientes)
+            {
+                if (ahora - alerta.Value >= VENTANA_DEDUPLICACION)
+                    alertasRecientes.TryRemove(alerta.Key, out _);
+            }
+
+            return true;
         }
 
         // Intenta vibrar cualquier gamepad (0..3). Devuelve true si logró iniciar vibración en alguno.
@@ -338,15 +501,19 @@ namespace ZumbidoJao
                             uint index = i;
                             Task.Run(() => {
                                 Thread.Sleep(durationMs);
-                                try { XINPUT_VIBRATION stop = new XINPUT_VIBRATION { wLeftMotorSpeed = 0, wRightMotorSpeed = 0 }; XInputSetState(index, ref stop); } catch { }
+                                try { XINPUT_VIBRATION stop = new XINPUT_VIBRATION { wLeftMotorSpeed = 0, wRightMotorSpeed = 0 }; XInputSetState(index, ref stop); }
+                                catch (Exception ex) { RegistrarError("XInput", "Detener vibración del gamepad", ex); }
                             });
                             return true;
                         }
                     }
-                    catch { /* si dll no disponible o controlador no responde */ }
+                    catch (Exception ex) { RegistrarError("XInput", "Consultar gamepad", ex); }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                RegistrarError("XInput", "Inicializar XInput", ex);
+            }
             return false;
         }
 
@@ -363,7 +530,7 @@ namespace ZumbidoJao
                 fwi.dwTimeout = 0;
                 FlashWindowEx(ref fwi);
             }
-            catch { }
+            catch (Exception ex) { RegistrarError("UI", "Parpadear ventana de alerta", ex); }
         }
 
         private async void BtnEnviar_Click(object? sender, EventArgs e)
@@ -393,6 +560,7 @@ namespace ZumbidoJao
             }
             catch (Exception ex)
             {
+                RegistrarError("Red", $"Enviar solicitud a {ip}", ex);
                 MessageBox.Show($"No se pudo conectar a {ip}.\n{ex.Message}", "Error");
             }
             finally
@@ -403,12 +571,14 @@ namespace ZumbidoJao
             // Si se envió correctamente, reproducir sonido local y mostrar popup (igual que receptor)
             if (enviado)
             {
-                try { soundPlayer?.Play(); } catch { }
-                try { MostrarMensajeEscritorio(mensaje, ip); } catch { }
+                try { soundPlayer?.Play(); }
+                catch (Exception ex) { RegistrarError("Audio", "Reproducir confirmación del emisor", ex); }
+                try { MostrarMensajeEscritorio(mensaje, ip); }
+                catch (Exception ex) { RegistrarError("UI", "Mostrar confirmación del emisor", ex); }
             }
         }
 
-        private void ActivarZumbido(string mensaje, string origenIp)
+        private async Task ActivarZumbidoAsync(string mensaje, string origenIp, string identidadEmisor)
         {
             // 1. Mostrar la ventana y hacerla temblar
             this.Show();
@@ -432,8 +602,9 @@ namespace ZumbidoJao
                     SystemSounds.Exclamation.Play();
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                RegistrarError("Audio", "Reproducir alerta del receptor", ex);
                 SystemSounds.Exclamation.Play();
             }
 
@@ -443,26 +614,28 @@ namespace ZumbidoJao
             for (int i = 0; i < 20; i++)
             {
                 this.Location = new Point(originalLocation.X + rnd.Next(-10, 10), originalLocation.Y + rnd.Next(-10, 10));
-                Thread.Sleep(20);
+                await Task.Delay(20);
             }
             this.Location = originalLocation;
 
             // 2. Mostrar la notificación nativa en la parte inferior derecha
             // Formato: tiempo visible en ms, título, texto, ícono.
-            trayIcon.ShowBalloonTip(5000, "Mensaje Importante", mensaje, ToolTipIcon.Info);
+            try { trayIcon.ShowBalloonTip(5000, "Mensaje Importante", mensaje, ToolTipIcon.Info); }
+            catch (Exception ex) { RegistrarError("UI", "Mostrar alerta del receptor", ex); }
 
             // 3. Mostrar un mensaje personalizado y colorido en el centro de pantalla (más grande y vistoso)
             try
             {
-                MostrarMensajeEscritorio(mensaje, origenIp);
+                MostrarMensajeEscritorio(mensaje, origenIp, bloquearPantalla: true, identidadEmisor: identidadEmisor);
             }
-            catch
+            catch (Exception ex)
             {
                 // No bloquear si hay algún fallo al crear la ventana personalizada
+                RegistrarError("UI", "Crear alerta modal del receptor", ex);
             }
         }
 
-        private void MostrarMensajeEscritorio(string mensaje, string origenIp)
+        private void MostrarMensajeEscritorio(string mensaje, string origenIp, bool bloquearPantalla = false, string? identidadEmisor = null)
         {
             // Nuevo diseño: título con icono, texto instructivo, caja grande centrada,
             // botón ENTENDIDO y X de cierre, además de footer y sombra.
@@ -478,7 +651,8 @@ namespace ZumbidoJao
             popup.TopMost = true;
             popup.ShowInTaskbar = true;
             // intentar usar el icono principal del formulario para que aparezca en la barra y en el popup
-            try { if (this.Icon != null) popup.Icon = this.Icon; } catch { }
+            try { if (this.Icon != null) popup.Icon = this.Icon; }
+            catch (Exception ex) { RegistrarError("Iconos", "Asignar icono al popup", ex); }
             popup.Opacity = 0.99;
 
             // sombra detrás del popup
@@ -516,11 +690,11 @@ namespace ZumbidoJao
                     if (!string.IsNullOrEmpty(found))
                     {
                         try { using (Icon ico = new Icon(found)) picBee.Image = ico.ToBitmap(); }
-                        catch { }
+                        catch (Exception ex) { RegistrarError("Iconos", "Convertir icono de abeja a imagen", ex); }
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { RegistrarError("Iconos", "Preparar icono de abeja", ex); }
 
             // pequeño icono de alerta (triángulo) entre la abeja y el título
             PictureBox alertIconSmall = new PictureBox();
@@ -528,7 +702,8 @@ namespace ZumbidoJao
             alertIconSmall.Location = new Point(56, 18);
             alertIconSmall.SizeMode = PictureBoxSizeMode.Zoom;
             alertIconSmall.BackColor = Color.Transparent;
-            try { alertIconSmall.Image = SystemIcons.Warning.ToBitmap(); } catch { }
+            try { alertIconSmall.Image = SystemIcons.Warning.ToBitmap(); }
+            catch (Exception ex) { RegistrarError("Iconos", "Crear icono de advertencia", ex); }
 
             // título con icono
             Label title = new Label();
@@ -542,7 +717,7 @@ namespace ZumbidoJao
 
             // texto instructivo centrado
             Label instruction = new Label();
-            instruction.Text = "Se requiere la presencia del JAO en:";
+            instruction.Text = $"Se requiere la presencia del JAO en:";
             instruction.Font = new Font("Segoe UI", 10F, FontStyle.Regular);
             instruction.ForeColor = Color.FromArgb(70, 70, 70);
             instruction.AutoSize = false;
@@ -627,14 +802,40 @@ namespace ZumbidoJao
 
             // preparar sombra para que no reciba clicks y mostrar sombra y popup
             try { shadow.Enabled = false; } catch { }
+            popup.FormClosed += (s, e) => { try { if (!shadow.IsDisposed) shadow.Close(); } catch { } };
             shadow.Show();
-            popup.Show();
-            popup.BringToFront();
-            popup.Activate();
-            try { popup.Focus(); } catch { }
-            try { btnEntendido.Focus(); } catch { }
-            // asegurar que el popup está encima
-            try { popup.BringToFront(); } catch { }
+
+            // animación de zumbido (temblor) del popup para llamar la atención
+            Task.Run(() =>
+            {
+                try
+                {
+                    Point orig = popup.Location;
+                    Random rnd = new Random();
+                    for (int i = 0; i < 20; i++)
+                    {
+                        if (popup.IsDisposed || !popup.IsHandleCreated) break;
+                        popup.Invoke(new Action(() => popup.Location = new Point(orig.X + rnd.Next(-10, 11), orig.Y + rnd.Next(-10, 11))));
+                        Thread.Sleep(20);
+                    }
+                    if (!popup.IsDisposed && popup.IsHandleCreated)
+                        popup.Invoke(new Action(() => popup.Location = orig));
+                }
+                catch { }
+            });
+
+            if (bloquearPantalla)
+            {
+                popup.ShowDialog(this);
+            }
+            else
+            {
+                popup.Show();
+                popup.BringToFront();
+                popup.Activate();
+                try { popup.Focus(); } catch { }
+                try { btnEntendido.Focus(); } catch { }
+            }
 
             // animación de zumbido (temblor) del popup para llamar la atención
             Task.Run(() =>
