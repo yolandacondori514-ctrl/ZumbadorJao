@@ -423,24 +423,22 @@ namespace ZumbidoJao
                     try
                     {
                         bool vibrated = TryVibrateAnyGamepad(600);
-                        if (!vibrated)
+                        if (!IsDisposed && IsHandleCreated)
                         {
-                            FlashWindowNotification();
-                            try { trayIcon?.ShowBalloonTip(3000, "Asistencia requerida", mensajeRecibido, ToolTipIcon.Info); }
-                            catch (Exception ex) { RegistrarError("UI", "Mostrar notificación de bandeja", ex); }
+                            BeginInvoke(new Action(() =>
+                            {
+                                if (!vibrated)
+                                {
+                                    FlashWindowNotification();
+                                    try { trayIcon?.ShowBalloonTip(3000, "Asistencia requerida", mensajeRecibido, ToolTipIcon.Info); }
+                                    catch (Exception ex) { RegistrarError("UI", "Mostrar notificación de bandeja", ex); }
+                                }
+
+                                _ = ActivarZumbidoAsync(mensajeRecibido, origen, identidadEmisor);
+                            }));
                         }
                     }
                     catch (Exception ex) { RegistrarError("Alertas", "Activar vibración o alerta visual", ex); }
-
-                    if (!IsDisposed && IsHandleCreated)
-                    {
-                        try
-                        {
-                            BeginInvoke(new Action(() => _ = ActivarZumbidoAsync(mensajeRecibido, origen, identidadEmisor)));
-                        }
-
-                        catch (InvalidOperationException ex) { RegistrarError("UI", "Programar alerta en el hilo de UI", ex); }
-                    }
                 }
             }
             catch (OperationCanceledException ex)
@@ -497,13 +495,7 @@ namespace ZumbidoJao
                         uint res = XInputSetState(i, ref vib);
                         if (res == 0)
                         {
-                            // Detener en background después de durationMs
-                            uint index = i;
-                            Task.Run(() => {
-                                Thread.Sleep(durationMs);
-                                try { XINPUT_VIBRATION stop = new XINPUT_VIBRATION { wLeftMotorSpeed = 0, wRightMotorSpeed = 0 }; XInputSetState(index, ref stop); }
-                                catch (Exception ex) { RegistrarError("XInput", "Detener vibración del gamepad", ex); }
-                            });
+                            _ = DetenerVibracionAsync(i, durationMs);
                             return true;
                         }
                     }
@@ -515,6 +507,17 @@ namespace ZumbidoJao
                 RegistrarError("XInput", "Inicializar XInput", ex);
             }
             return false;
+        }
+
+        private static async Task DetenerVibracionAsync(uint index, int durationMs)
+        {
+            await Task.Delay(durationMs).ConfigureAwait(false);
+            try
+            {
+                XINPUT_VIBRATION stop = new() { wLeftMotorSpeed = 0, wRightMotorSpeed = 0 };
+                XInputSetState(index, ref stop);
+            }
+            catch (Exception ex) { RegistrarError("XInput", "Detener vibración del gamepad", ex); }
         }
 
         // Parpadea la ventana para llamar la atención (alerta visual)
@@ -762,16 +765,7 @@ namespace ZumbidoJao
             btnEntendido.Location = new Point((inner.Width - btnEntendido.Width) / 2, inner.Height - btnEntendido.Height - 34);
             btnEntendido.Anchor = AnchorStyles.Bottom;
             btnEntendido.Cursor = Cursors.Hand;
-            btnEntendido.Click += (s, e) =>
-            {
-                try
-                {
-                    // Cerrar popup y sombra de forma segura
-                    try { if (popup != null && !popup.IsDisposed) { if (popup.InvokeRequired) popup.Invoke(new Action(() => popup.Close())); else popup.Close(); } } catch { }
-                    try { if (shadow != null && !shadow.IsDisposed) { if (shadow.InvokeRequired) shadow.Invoke(new Action(() => shadow.Close())); else shadow.Close(); } } catch { }
-                }
-                catch { }
-            };
+            btnEntendido.Click += (s, e) => popup.Close();
 
             // Aplicar estilo degradado magenta->azul al botón ENTENDIDO
             ApplyGradientStyle(btnEntendido);
@@ -803,26 +797,8 @@ namespace ZumbidoJao
             // preparar sombra para que no reciba clicks y mostrar sombra y popup
             try { shadow.Enabled = false; } catch { }
             popup.FormClosed += (s, e) => { try { if (!shadow.IsDisposed) shadow.Close(); } catch { } };
+            popup.Shown += (s, e) => _ = AnimarPopupAsync(popup);
             shadow.Show();
-
-            // animación de zumbido (temblor) del popup para llamar la atención
-            Task.Run(() =>
-            {
-                try
-                {
-                    Point orig = popup.Location;
-                    Random rnd = new Random();
-                    for (int i = 0; i < 20; i++)
-                    {
-                        if (popup.IsDisposed || !popup.IsHandleCreated) break;
-                        popup.Invoke(new Action(() => popup.Location = new Point(orig.X + rnd.Next(-10, 11), orig.Y + rnd.Next(-10, 11))));
-                        Thread.Sleep(20);
-                    }
-                    if (!popup.IsDisposed && popup.IsHandleCreated)
-                        popup.Invoke(new Action(() => popup.Location = orig));
-                }
-                catch { }
-            });
 
             if (bloquearPantalla)
             {
@@ -837,27 +813,35 @@ namespace ZumbidoJao
                 try { btnEntendido.Focus(); } catch { }
             }
 
-            // animación de zumbido (temblor) del popup para llamar la atención
-            Task.Run(() =>
-            {
-                try
-                {
-                    Point orig = popup.Location;
-                    Random rnd = new Random();
-                    for (int i = 0; i < 20; i++)
-                    {
-                        if (popup.IsDisposed || !popup.IsHandleCreated) break;
-                        popup.Invoke(new Action(() => popup.Location = new Point(orig.X + rnd.Next(-10, 11), orig.Y + rnd.Next(-10, 11))));
-                        Thread.Sleep(20);
-                    }
-                    if (!popup.IsDisposed && popup.IsHandleCreated)
-                        popup.Invoke(new Action(() => popup.Location = orig));
-                }
-                catch { }
-            });
-
             // Cerrar la sombra si el popup se cierra
             popup.FormClosed += (s, e) => { try { if (!shadow.IsDisposed) shadow.Close(); } catch { } };
+        }
+
+        private async Task AnimarPopupAsync(Form popup)
+        {
+            Point ubicacionOriginal = popup.Location;
+            Random random = new();
+
+            try
+            {
+                for (int i = 0; i < 20; i++)
+                {
+                    if (popup.IsDisposed || !popup.IsHandleCreated)
+                        return;
+
+                    popup.Location = new Point(
+                        ubicacionOriginal.X + random.Next(-10, 11),
+                        ubicacionOriginal.Y + random.Next(-10, 11));
+                    await Task.Delay(20);
+                }
+
+                if (!popup.IsDisposed && popup.IsHandleCreated)
+                    popup.Location = ubicacionOriginal;
+            }
+            catch (Exception ex)
+            {
+                RegistrarError("UI", "Animar popup de alerta", ex);
+            }
         }
 
         protected override void SetVisibleCore(bool value)
