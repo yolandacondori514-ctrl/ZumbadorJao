@@ -22,6 +22,14 @@
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </None>
+    <None Include="..\scripts\Install-ZumbidoJaoFirewall.ps1" Link="Install-ZumbidoJaoFirewall.ps1">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </None>
+    <None Include="..\scripts\Rollback-ZumbidoJao.ps1" Link="Rollback-ZumbidoJao.ps1">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 
   <!-- Si deseas usar messenger.wav o un icono personalizado, añádelos al proyecto y configura CopyToOutputDirectory=PreserveNewest -->
