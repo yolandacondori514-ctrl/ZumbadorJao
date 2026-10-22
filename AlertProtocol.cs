@@ -11,7 +11,7 @@ internal static class AlertProtocol
 {
     private const int ProtocolVersion = 1;
     private const string MessageType = "zumbido";
-    private const int HeaderLength = sizeof(int);
+    private const int HeaderLength = sizeof(int);1
     private const int MaxPayloadLength = 256;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
